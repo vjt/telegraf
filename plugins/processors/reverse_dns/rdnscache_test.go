@@ -11,7 +11,7 @@ import (
 )
 
 func TestSimpleReverseDNSLookup(t *testing.T) {
-	d := newReverseDNSCache(60*time.Second, 1*time.Second, -1)
+	d := newReverseDNSCache(60*time.Second, 60*time.Second, 1*time.Second, -1)
 	defer d.stop()
 
 	d.resolver = &localResolver{}
@@ -42,7 +42,7 @@ func TestSimpleReverseDNSLookup(t *testing.T) {
 }
 
 func TestParallelReverseDNSLookup(t *testing.T) {
-	d := newReverseDNSCache(1*time.Second, 1*time.Second, -1)
+	d := newReverseDNSCache(1*time.Second, 1*time.Second, 1*time.Second, -1)
 	defer d.stop()
 
 	d.resolver = &localResolver{}
@@ -79,7 +79,7 @@ func TestParallelReverseDNSLookup(t *testing.T) {
 }
 
 func TestUnavailableDNSServerRespectsTimeout(t *testing.T) {
-	d := newReverseDNSCache(0, 1, -1)
+	d := newReverseDNSCache(0, 0, 1, -1)
 	defer d.stop()
 
 	d.resolver = &timeoutResolver{}
@@ -93,7 +93,7 @@ func TestUnavailableDNSServerRespectsTimeout(t *testing.T) {
 
 func TestCleanupHappens(t *testing.T) {
 	ttl := 100 * time.Millisecond
-	d := newReverseDNSCache(ttl, 1*time.Second, -1)
+	d := newReverseDNSCache(ttl, ttl, 1*time.Second, -1)
 	defer d.stop()
 
 	d.resolver = &localResolver{}
@@ -114,7 +114,7 @@ func TestCleanupHappens(t *testing.T) {
 }
 
 func TestLookupTimeout(t *testing.T) {
-	d := newReverseDNSCache(10*time.Second, 10*time.Second, -1)
+	d := newReverseDNSCache(10*time.Second, 10*time.Second, 10*time.Second, -1)
 	defer d.stop()
 
 	d.resolver = &timeoutResolver{}
@@ -133,6 +133,55 @@ type localResolver struct{}
 
 func (*localResolver) LookupAddr(context.Context, string) (names []string, err error) {
 	return []string{"localhost"}, nil
+}
+
+func TestAbandonedLookupCachesNegativeResult(t *testing.T) {
+	ttl := 5 * time.Second
+	negativeTTL := 1 * time.Second
+	lookupTimeout := 50 * time.Millisecond
+	d := newReverseDNSCache(ttl, negativeTTL, lookupTimeout, 2)
+	defer d.stop()
+
+	d.resolver = &timeoutResolver{}
+
+	// First lookup: should timeout and cache a negative result
+	result, err := d.lookup("10.0.0.1")
+	require.Error(t, err)
+	require.Nil(t, result)
+
+	stats := d.getStats()
+	require.EqualValues(t, 1, stats.cacheMiss, "first lookup should be a cache miss")
+	require.EqualValues(t, 1, stats.requestsAbandoned, "first lookup should be abandoned")
+
+	// Second lookup: should hit the negative cache, not spawn a new lookup
+	result, err = d.lookup("10.0.0.1")
+	require.NoError(t, err, "negative cache hit should not return error")
+	require.Nil(t, result, "negative cache should return nil domains")
+
+	stats = d.getStats()
+	require.EqualValues(t, 1, stats.cacheMiss, "second lookup should NOT be a cache miss")
+	require.EqualValues(t, 1, stats.cacheHit, "second lookup should be a cache hit")
+}
+
+func TestAbandonedLookupDoesNotRetryForever(t *testing.T) {
+	ttl := 5 * time.Second
+	negativeTTL := 1 * time.Second
+	lookupTimeout := 50 * time.Millisecond
+	d := newReverseDNSCache(ttl, negativeTTL, lookupTimeout, 2)
+	defer d.stop()
+
+	d.resolver = &timeoutResolver{}
+
+	// Simulate 100 lookups for the same unreachable IP
+	for i := 0; i < 100; i++ {
+		d.lookup("192.168.1.1") //nolint:errcheck // we expect errors
+	}
+
+	stats := d.getStats()
+	require.EqualValues(t, 1, stats.cacheMiss,
+		"only the first lookup should be a cache miss; rest hit negative cache")
+	require.EqualValues(t, 99, stats.cacheHit,
+		"subsequent lookups should hit the negative cache entry")
 }
 
 // blockAllWorkers is a test function that eats up all the worker pool space to

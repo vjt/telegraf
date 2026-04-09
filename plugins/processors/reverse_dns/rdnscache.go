@@ -31,6 +31,7 @@ type reverseDNSCache struct {
 
 	// settings
 	ttl           time.Duration
+	negativeTTL   time.Duration
 	lookupTimeout time.Duration
 	maxWorkers    int
 
@@ -60,13 +61,14 @@ type rDNSCacheStats struct {
 	requestsFilled    uint64
 }
 
-func newReverseDNSCache(ttl, lookupTimeout time.Duration, workerPoolSize int) *reverseDNSCache {
+func newReverseDNSCache(ttl, negativeTTL, lookupTimeout time.Duration, workerPoolSize int) *reverseDNSCache {
 	if workerPoolSize <= 0 {
 		workerPoolSize = defaultMaxWorkers
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &reverseDNSCache{
 		ttl:                 ttl,
+		negativeTTL:         negativeTTL,
 		lookupTimeout:       lookupTimeout,
 		cache:               make(map[string]*dnslookup),
 		maxWorkers:          workerPoolSize,
@@ -254,8 +256,20 @@ func (d *reverseDNSCache) abandonLookup(ip string, err error) {
 	}
 
 	callbacks := lookup.callbacks
-	delete(d.cache, lookup.ip)
+	// Cache the negative result instead of deleting the entry. This prevents
+	// infinite retry loops for IPs that will never resolve (RFC1918, broadcast,
+	// etc.). The entry expires after negativeTTL, allowing periodic retries.
+	lookup.completed = true
+	lookup.domains = nil
+	lookup.callbacks = nil
+	lookup.expiresAt = time.Now().Add(d.negativeTTL)
+	d.lockedSaveToCache(lookup)
 	d.rwLock.Unlock()
+
+	d.expireListLock.Lock()
+	d.expireList = append(d.expireList, lookup)
+	d.expireListLock.Unlock()
+
 	// resolve the remaining callbacks to free the resources.
 	atomic.AddUint64(&d.stats.requestsAbandoned, uint64(len(callbacks)))
 	for _, cb := range callbacks {

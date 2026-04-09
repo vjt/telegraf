@@ -17,6 +17,7 @@ var sampleConfig string
 type ReverseDNS struct {
 	Lookups            []lookupEntry   `toml:"lookup"`
 	CacheTTL           config.Duration `toml:"cache_ttl"`
+	NegativeCacheTTL   config.Duration `toml:"negative_cache_ttl"`
 	LookupTimeout      config.Duration `toml:"lookup_timeout"`
 	MaxParallelLookups int             `toml:"max_parallel_lookups"`
 	Ordered            bool            `toml:"ordered"`
@@ -39,8 +40,13 @@ func (*ReverseDNS) SampleConfig() string {
 
 func (r *ReverseDNS) Start(acc telegraf.Accumulator) error {
 	r.acc = acc
+	negativeTTL := time.Duration(r.NegativeCacheTTL)
+	if negativeTTL <= 0 {
+		negativeTTL = 15 * time.Minute
+	}
 	r.reverseDNSCache = newReverseDNSCache(
 		time.Duration(r.CacheTTL),
+		negativeTTL,
 		time.Duration(r.LookupTimeout),
 		r.MaxParallelLookups, // max parallel reverse-dns lookups
 	)
