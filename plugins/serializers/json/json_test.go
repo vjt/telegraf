@@ -203,6 +203,35 @@ func TestSerializeBatch(t *testing.T) {
 	)
 }
 
+func TestSerializeBatchNewlineDelimited(t *testing.T) {
+	m1 := metric.New(
+		"cpu",
+		map[string]string{"host": "a"},
+		map[string]interface{}{"value": 1.0},
+		time.Unix(0, 0),
+	)
+	m2 := metric.New(
+		"cpu",
+		map[string]string{"host": "b"},
+		map[string]interface{}{"value": 2.0},
+		time.Unix(0, 0),
+	)
+
+	s := Serializer{NewlineBatch: true}
+	require.NoError(t, s.Init())
+	buf, err := s.SerializeBatch([]telegraf.Metric{m1, m2})
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(buf)), "\n")
+	require.Len(t, lines, 2)
+
+	var obj1, obj2 map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &obj1))
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &obj2))
+	require.Equal(t, "a", obj1["tags"].(map[string]interface{})["host"])
+	require.Equal(t, "b", obj2["tags"].(map[string]interface{})["host"])
+}
+
 func TestSerializeBatchSkipInf(t *testing.T) {
 	metrics := []telegraf.Metric{
 		metric.New(

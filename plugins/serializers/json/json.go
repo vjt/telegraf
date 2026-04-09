@@ -21,6 +21,7 @@ type Serializer struct {
 	Transformation      string          `toml:"json_transformation"`
 	NestedFieldsInclude []string        `toml:"json_nested_fields_include"`
 	NestedFieldsExclude []string        `toml:"json_nested_fields_exclude"`
+	NewlineBatch        bool            `toml:"json_newline_batch"`
 
 	nestedFields filter.Filter
 }
@@ -78,6 +79,21 @@ func (s *Serializer) Serialize(metric telegraf.Metric) ([]byte, error) {
 }
 
 func (s *Serializer) SerializeBatch(metrics []telegraf.Metric) ([]byte, error) {
+	// Newline-delimited batch: concatenate individual Serialize() calls
+	// producing NDJSON (one JSON object per line). Used by endpoints
+	// like VictoriaLogs /insert/jsonline.
+	if s.NewlineBatch {
+		var buf []byte
+		for _, m := range metrics {
+			b, err := s.Serialize(m)
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, b...)
+		}
+		return buf, nil
+	}
+
 	objects := make([]interface{}, 0, len(metrics))
 	for _, metric := range metrics {
 		m := s.createObject(metric)
