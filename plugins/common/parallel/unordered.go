@@ -56,5 +56,14 @@ func (p *Unordered) Stop() {
 }
 
 func (p *Unordered) Enqueue(m telegraf.Metric) {
-	p.inQueue <- m
+	select {
+	case p.inQueue <- m:
+		// Successfully queued for processing
+	default:
+		// Worker pool saturated — pass metric through unprocessed rather
+		// than blocking the entire pipeline. This gives "best effort"
+		// enrichment: metrics get processed when workers can keep up,
+		// and pass through unenriched when they can't.
+		p.acc.AddMetric(m)
+	}
 }

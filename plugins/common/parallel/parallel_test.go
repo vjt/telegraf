@@ -112,6 +112,57 @@ func BenchmarkUnordered(b *testing.B) {
 	p.Stop()
 }
 
+func TestUnorderedEnqueueDoesNotBlockWhenWorkersSaturated(t *testing.T) {
+	acc := &testutil.Accumulator{}
+	workerCount := 5
+
+	// slowJobFunc simulates a slow processor (e.g. DNS lookup).
+	// Workers hold their slots for the entire test duration.
+	blocked := make(chan struct{})
+	slowJobFunc := func(m telegraf.Metric) []telegraf.Metric {
+		<-blocked // block forever until test cleanup
+		return []telegraf.Metric{m}
+	}
+
+	p := parallel.NewUnordered(acc, slowJobFunc, workerCount)
+
+	// Fill the channel buffer (size = workerCount) and saturate all workers.
+	// Send workerCount metrics to fill the channel + workerCount to saturate workers.
+	for i := 0; i < workerCount*2; i++ {
+		p.Enqueue(metric.New("test",
+			map[string]string{},
+			map[string]interface{}{"val": i},
+			time.Now(),
+		))
+	}
+
+	// At this point all workers are blocked and the channel is full.
+	// The next Enqueue MUST NOT block — it should pass through to the accumulator.
+	done := make(chan struct{})
+	go func() {
+		p.Enqueue(metric.New("test",
+			map[string]string{},
+			map[string]interface{}{"val": 999},
+			time.Now(),
+		))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Enqueue returned without blocking — correct behavior
+	case <-time.After(1 * time.Second):
+		t.Fatal("Enqueue blocked when workers were saturated — this would deadlock the pipeline")
+	}
+
+	// The passthrough metric should have been added directly to the accumulator
+	require.GreaterOrEqual(t, len(acc.Metrics), 1, "passthrough metric should appear in accumulator")
+
+	// Cleanup: unblock workers and stop
+	close(blocked)
+	p.Stop()
+}
+
 func jobFunc(m telegraf.Metric) []telegraf.Metric {
 	return []telegraf.Metric{m}
 }

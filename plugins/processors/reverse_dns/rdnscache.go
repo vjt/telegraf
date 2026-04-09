@@ -254,8 +254,22 @@ func (d *reverseDNSCache) abandonLookup(ip string, err error) {
 	}
 
 	callbacks := lookup.callbacks
-	delete(d.cache, lookup.ip)
+	// Keep the cache entry as a negative cache result instead of deleting it.
+	// This prevents the same unreachable IP from being re-looked-up on every
+	// subsequent metric, which under load creates an infinite retry storm
+	// (lookup -> timeout -> delete -> lookup -> ...). The entry will expire
+	// naturally after TTL, allowing periodic retries without continuous waste.
+	lookup.completed = true
+	lookup.domains = nil
+	lookup.callbacks = nil
+	d.lockedSaveToCache(lookup)
 	d.rwLock.Unlock()
+
+	// Add to expire list so it gets cleaned up after TTL
+	d.expireListLock.Lock()
+	d.expireList = append(d.expireList, lookup)
+	d.expireListLock.Unlock()
+
 	// resolve the remaining callbacks to free the resources.
 	atomic.AddUint64(&d.stats.requestsAbandoned, uint64(len(callbacks)))
 	for _, cb := range callbacks {
