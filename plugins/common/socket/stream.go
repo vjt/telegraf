@@ -474,10 +474,17 @@ func (l *streamListener) handleConnection(ctx context.Context, conn net.Conn, on
 		src = &net.UnixAddr{Name: l.path, Net: "unix"}
 	}
 
-	// Create a pipe and feed it to the callback
+	// Create a pipe and feed it to the callback.
+	// The reader MUST be closed when the callback exits, otherwise the
+	// writer.Write() below will block forever waiting for a reader that
+	// will never consume. This causes a pipeline deadlock under sustained
+	// load (e.g. high-volume syslog backfill).
 	reader, writer := io.Pipe()
 	defer writer.Close()
-	go onConnection(src, reader)
+	go func() {
+		defer reader.Close()
+		onConnection(src, reader)
+	}()
 
 	timeout := time.Duration(l.ReadTimeout)
 	buf := make([]byte, 4096) // 4kb
